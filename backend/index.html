@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full bg-gray-950">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Titanic SQL Assistant</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.6.0/css/all.min.css"/>
+  <style>
+    body { font-family: 'Segoe UI', system-ui, sans-serif; }
+    .chat-container { scrollbar-width: thin; scrollbar-color: #4b5563 #1f2937; }
+    .message-bubble { max-width: 80%; }
+  </style>
+</head>
+<body class="h-full text-gray-100">
+
+<div class="flex h-screen">
+  <!-- Sidebar -->
+  <div class="w-72 bg-gray-900 border-r border-gray-800 flex flex-col">
+    <div class="p-6 border-b border-gray-800">
+      <h1 class="text-2xl font-bold flex items-center gap-3">
+        <i class="fas fa-ship text-blue-500"></i>
+        Titanic Assistant
+      </h1>
+      <p class="text-sm text-gray-400 mt-1">Ask anything about the Titanic dataset</p>
+    </div>
+
+    <div class="p-4">
+      <div class="text-xs uppercase tracking-widest text-gray-500 mb-2 px-3">Examples</div>
+      <div class="space-y-1 text-sm">
+        <button onclick="useExample(this)" class="w-full text-left px-3 py-2 hover:bg-gray-800 rounded-lg text-gray-300">
+          How many passengers survived?
+        </button>
+        <button onclick="useExample(this)" class="w-full text-left px-3 py-2 hover:bg-gray-800 rounded-lg text-gray-300">
+          What was the survival rate for women?
+        </button>
+        <button onclick="useExample(this)" class="w-full text-left px-3 py-2 hover:bg-gray-800 rounded-lg text-gray-300">
+          Average age of passengers by class?
+        </button>
+        <button onclick="useExample(this)" class="w-full text-left px-3 py-2 hover:bg-gray-800 rounded-lg text-gray-300">
+          Who was the youngest survivor?
+        </button>
+      </div>
+    </div>
+
+    <div class="mt-auto p-4 border-t border-gray-800">
+      <div class="text-xs text-gray-500">
+        Backend: <span class="text-emerald-400">FastAPI</span><br>
+        Connected to: <span class="text-emerald-400">titanics.db</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Main Chat -->
+  <div class="flex-1 flex flex-col">
+    <!-- Header -->
+    <div class="bg-gray-900 border-b border-gray-800 px-6 py-4 flex items-center justify-between">
+      <div class="flex items-center gap-3">
+        <div class="w-3 h-3 bg-emerald-500 rounded-full animate-pulse"></div>
+        <span class="font-medium">Chat with Titanic Data</span>
+      </div>
+      <button onclick="clearChat()" 
+              class="px-4 py-2 text-sm bg-gray-800 hover:bg-gray-700 rounded-lg transition-colors">
+        <i class="fas fa-trash mr-2"></i> Clear Chat
+      </button>
+    </div>
+
+    <!-- Messages -->
+    <div id="chat" class="flex-1 overflow-y-auto chat-container p-6 space-y-6 bg-gray-950">
+      <!-- Messages will be appended here -->
+    </div>
+
+    <!-- Input -->
+    <div class="border-t border-gray-800 bg-gray-900 p-6">
+      <form id="query-form" class="flex gap-3">
+        <input 
+          type="text" 
+          id="question-input"
+          placeholder="Ask a question about the Titanic passengers..."
+          class="flex-1 bg-gray-800 border border-gray-700 rounded-2xl px-6 py-4 focus:outline-none focus:border-blue-500 transition-colors"
+        />
+        <button 
+          type="submit"
+          class="bg-blue-600 hover:bg-blue-500 px-8 rounded-2xl font-medium transition-colors flex items-center gap-2"
+        >
+          <i class="fas fa-paper-plane"></i>
+          Send
+        </button>
+      </form>
+      <p class="text-center text-xs text-gray-500 mt-3">
+        Powered by Groq • BM25 + Semantic Search • SQLite
+      </p>
+    </div>
+  </div>
+</div>
+
+<script>
+let history = [];
+
+const chatContainer = document.getElementById('chat');
+const form = document.getElementById('query-form');
+const input = document.getElementById('question-input');
+
+function addMessage(role, content, sql = null, rows = null) {
+  const messageDiv = document.createElement('div');
+  messageDiv.className = `flex ${role === 'user' ? 'justify-end' : 'justify-start'}`;
+
+  let html = `
+    <div class="message-bubble">
+      <div class="${role === 'user' 
+        ? 'bg-blue-600 text-white' 
+        : 'bg-gray-800'} rounded-3xl px-6 py-4">
+        ${content}
+      </div>`;
+
+  if (sql) {
+    html += `
+      <div class="mt-3 text-xs">
+        <button onclick="toggleSql(this)" 
+                class="flex items-center gap-2 text-gray-400 hover:text-gray-200">
+          <i class="fas fa-code"></i>
+          <span>Show SQL</span>
+        </button>
+        <pre class="hidden mt-2 bg-gray-900 p-4 rounded-2xl text-blue-300 overflow-x-auto text-xs">${sql}</pre>
+      </div>`;
+  }
+
+  if (rows && rows.length > 0) {
+    html += `
+      <div class="mt-3 text-xs">
+        <button onclick="toggleTable(this)" 
+                class="flex items-center gap-2 text-gray-400 hover:text-gray-200">
+          <i class="fas fa-table"></i>
+          <span>Show Data (${rows.length} rows)</span>
+        </button>
+        <div class="hidden mt-2 bg-gray-900 rounded-2xl overflow-hidden">
+          ${createTable(rows)}
+        </div>
+      </div>`;
+  }
+
+  html += `</div>`;
+  messageDiv.innerHTML = html;
+  chatContainer.appendChild(messageDiv);
+  chatContainer.scrollTop = chatContainer.scrollHeight;
+}
+
+function createTable(rows) {
+  if (!rows.length) return '';
+  const columns = Object.keys(rows[0]);
+  let html = `<table class="w-full text-xs"><thead><tr class="bg-gray-800">`;
+  columns.forEach(col => {
+    html += `<th class="px-4 py-2 text-left border-b border-gray-700">${col}</th>`;
+  });
+  html += `</tr></thead><tbody>`;
+  rows.forEach(row => {
+    html += `<tr class="border-b border-gray-800 hover:bg-gray-800">`;
+    columns.forEach(col => {
+      html += `<td class="px-4 py-2">${row[col] !== null ? row[col] : '—'}</td>`;
+    });
+    html += `</tr>`;
+  });
+  html += `</tbody></table>`;
+  return html;
+}
+
+function toggleSql(btn) {
+  const pre = btn.parentElement.querySelector('pre');
+  pre.classList.toggle('hidden');
+}
+
+function toggleTable(btn) {
+  const div = btn.parentElement.querySelector('div');
+  div.classList.toggle('hidden');
+}
+
+async function sendQuery(question) {
+  // Add user message
+  addMessage('user', question);
+  
+  const payload = {
+    question: question,
+    history: history
+  };
+
+  try {
+    const res = await fetch('http://127.0.0.1:8000/query', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+
+    const data = await res.json();
+
+    if (data.success) {
+      history = data.history || [];
+      addMessage('assistant', data.description, data.sql, data.rows);
+    } else {
+      addMessage('assistant', `❌ Error: ${data.error || 'Something went wrong'}`);
+    }
+  } catch (err) {
+    addMessage('assistant', `❌ Connection error: ${err.message}`);
+  }
+}
+
+form.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const question = input.value.trim();
+  if (!question) return;
+
+  await sendQuery(question);
+  input.value = '';
+});
+
+function useExample(btn) {
+  const question = btn.textContent.trim();
+  input.value = question;
+  sendQuery(question);
+}
+
+function clearChat() {
+  if (confirm('Clear the entire chat history?')) {
+    chatContainer.innerHTML = '';
+    history = [];
+    addMessage('assistant', '👋 Hello! Ask me anything about the Titanic passengers.');
+  }
+}
+
+// Welcome message
+window.onload = () => {
+  addMessage('assistant', 
+    '👋 Hello! I can answer questions about the Titanic dataset using natural language.<br><br>' +
+    'Try asking:<br>' +
+    '• How many passengers survived?<br>' +
+    '• What was the survival rate for women?<br>' +
+    '• Average fare by class?'
+  );
+};
+</script>
+
+</body>
+</html>
