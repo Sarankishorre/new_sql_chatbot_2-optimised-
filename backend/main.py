@@ -67,6 +67,7 @@ print(schema)
 
 # step 3 — query classification (sql vs general)
 groq_model = os.getenv("GROQ_MODEL")
+groq_small_model=os.getenv("groq_model2")
 groq_api_key = os.getenv("GROQ_API_KEY")
 groq_client = Groq(api_key=groq_api_key)
 
@@ -104,9 +105,10 @@ def standalone_question(query: str, history: list[dict]) -> str:
     If already standalone, return unchanged.
     return only the rewritten question nothing else"""
     response = groq_client.chat.completions.create(
-        model=groq_model,
+        model=groq_small_model,
         messages=[{"role": "user", "content": prompt}],
-        temperature=0.3
+        temperature=0,
+        reasoning_effort="low"
     )
     print("standalone question:",response.choices[0].message.content.strip())
     return response.choices[0].message.content.strip()
@@ -115,7 +117,7 @@ def standalone_question(query: str, history: list[dict]) -> str:
 @traceable(name="classify_query", run_type="llm")
 def classify_query(query):
     response = groq_client.chat.completions.create(
-        model=groq_model,
+        model=groq_small_model,
         messages=[{
             "role": "user",
             "content": f"""Classify this question as either 'sql' or 'general'.
@@ -136,7 +138,7 @@ No explanation. No punctuation. Just the word.
 Question: {query}"""
         }],
         temperature=0,
-        reasoning_format="hidden"
+        reasoning_effort="low"
 
     )
     result = response.choices[0].message.content.strip().lower()
@@ -326,7 +328,7 @@ Valid columns: {list(schema.keys())}"""
         system_prompt = build_intent_prompt(retrieved_schema, examples, error_feedback)
 
     response = groq_client.chat.completions.create(
-        model=groq_model,
+        model=groq_small_model,
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_question}
@@ -614,7 +616,7 @@ def build_result_summary(rows: list, columns: list, max_rows: int = 5) -> str:
 def summarize_result(question: str, sql: str, rows: list, columns: list) -> str:
     preview = rows[:5]
     response = groq_client.chat.completions.create(
-        model=groq_model,
+        model=groq_small_model,
         messages=[{
             "role": "user",
             "content": f"""Question: {question}
@@ -627,7 +629,7 @@ Write a short, plain-English 1-3 sentence answer to the question based on this d
 Do not mention SQL. Do not repeat the raw rows. Just answer naturally."""
         }],
         temperature=0,
-        reasoning_format="hidden"
+        reasoning_effort="low"
     )
     return response.choices[0].message.content.strip()
 
@@ -657,7 +659,7 @@ def followup_suggestion(sql,query,schemas,rows,cols,n=3):
     {json.dumps(top_res,default=str)}
     follow up questions (json array)"""
     response=groq_client.chat.completions.create(
-        model=groq_model,
+        model=groq_small_model,
         messages=[{
             "role":"user",
             "content":prompt
@@ -725,7 +727,7 @@ def process_query(question: str, history: list[dict]):
 
     if category == "general":
         resp = groq_client.chat.completions.create(
-            model=groq_model,
+            model=groq_small_model,
             messages=[{"role": "user", "content": f"""you are a titanic dataset expert and you need to explain about the questions related to the titanic dataset such as questions related to the columns present
                        or anything bounded inside the titanic dataset .
                        using the information provided  in 2-3 lines
@@ -739,7 +741,7 @@ def process_query(question: str, history: list[dict]):
  
                        """}],
                        temperature=0.2,
-                       reasoning_format="hidden"
+                       reasoning_effort="low"
         )
         description = resp.choices[0].message.content.strip()
         history.append({"question": question,"tables": [], "result_summary": description})
