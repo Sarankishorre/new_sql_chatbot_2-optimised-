@@ -24,7 +24,9 @@ load_dotenv()
 
 # step 1 — load data into SQLite
 print("creating a sqlite database and loading the data")
-df = pd.read_csv(r"D:\NEW_SQL_RAG\docs\titanic_cleaned_new.csv")
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+csv_path = os.path.join(BASE_DIR, "..", "docs", "titanic_cleaned_new.csv")
+df = pd.read_csv(csv_path)
 conn = sqlite3.connect("titanics.db", check_same_thread=False)
 df.to_sql("titanic", conn, if_exists="replace", index=False)
 conn.commit()
