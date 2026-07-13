@@ -106,8 +106,7 @@ def standalone_question(query: str, history: list[dict]) -> str:
     response = groq_client.chat.completions.create(
         model=groq_model,
         messages=[{"role": "user", "content": prompt}],
-        temperature=0,
-        reasoning_effort="low"
+        temperature=0.3
     )
     print("standalone question:",response.choices[0].message.content.strip())
     return response.choices[0].message.content.strip()
@@ -136,8 +135,8 @@ No explanation. No punctuation. Just the word.
 
 Question: {query}"""
         }],
-        temperature=0,
-        reasoning_effort="low"
+        temperature=0.3
+
     )
     result = response.choices[0].message.content.strip().lower()
     return "sql" if "sql" in result else "general"
@@ -331,8 +330,7 @@ Valid columns: {list(schema.keys())}"""
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_question}
         ],
-        temperature=0,
-        reasoning_effort="medium",
+        temperature=0.2,
         response_format={"type": "json_object"}
     )
 
@@ -627,8 +625,7 @@ Sample rows (up to 5): {json.dumps(preview, default=str)}
 Write a short, plain-English 1-3 sentence answer to the question based on this data.
 Do not mention SQL. Do not repeat the raw rows. Just answer naturally."""
         }],
-        temperature=0,
-        reasoning_effort="low"
+        temperature=0.3
     )
     return response.choices[0].message.content.strip()
 
@@ -663,8 +660,7 @@ def followup_suggestion(sql,query,schemas,rows,cols,n=3):
             "role":"user",
             "content":prompt
         }],
-        temperature=0,
-         reasoning_effort="low",
+        temperature=0.3,
         response_format={"type": "json_object"} if False else None,  # see note below
     )
     raw_ans=response.choices[0].message.content.strip()
