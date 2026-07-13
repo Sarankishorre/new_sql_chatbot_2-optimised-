@@ -101,7 +101,7 @@ const chatContainer = document.getElementById('chat');
 const form = document.getElementById('query-form');
 const input = document.getElementById('question-input');
 
-function addMessage(role, content, sql = null, rows = null) {
+function addMessage(role, content, sql = null, rows = null,suggestion_ques = null) {
   const messageDiv = document.createElement('div');
   messageDiv.className = `flex ${role === 'user' ? 'justify-end' : 'justify-start'}`;
 
@@ -138,7 +138,18 @@ function addMessage(role, content, sql = null, rows = null) {
         </div>
       </div>`;
   }
-
+  if (suggestion_ques && suggestion_ques.length > 0) {
+    html += `<div class="mt-3 flex flex-wrap gap-2">`;
+    suggestion_ques.forEach(q => {
+      const safeQ = q.replace(/'/g, "\\'").replace(/"/g, '&quot;');
+      html += `
+        <button onclick="sendQuery('${safeQ}')" 
+                class="suggestion-chip text-xs bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded-full px-4 py-2 transition-colors">
+          ${q}
+        </button>`;
+    });
+    html += `</div>`;
+  }
   html += `</div>`;
   messageDiv.innerHTML = html;
   chatContainer.appendChild(messageDiv);
@@ -194,7 +205,8 @@ async function sendQuery(question) {
 
     if (data.success) {
       history = data.history || [];
-      addMessage('assistant', data.description, data.sql, data.rows);
+      addMessage('assistant', data.description, data.sql, data.rows, data.suggested_ques);
+ 
     } else {
       addMessage('assistant', `❌ Error: ${data.error || 'Something went wrong'}`);
     }

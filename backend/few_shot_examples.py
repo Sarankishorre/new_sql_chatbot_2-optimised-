@@ -150,6 +150,32 @@ GROUP BY Pclass
 ORDER BY survivor_count DESC
 LIMIT 1
 ---
+---
+Question: Who paid the highest fare?
+SQL:
+SELECT *
+FROM titanic
+ORDER BY Fare DESC
+LIMIT 1
+---
+Question: Who was the oldest passenger on board?
+SQL:
+SELECT *
+FROM titanic
+ORDER BY Age DESC
+LIMIT 1
+---
+Question: Who was the cheapest ticket sold to?
+SQL:
+SELECT *
+FROM titanic
+ORDER BY Fare ASC
+LIMIT 1
+---
+Question: What is the highest fare paid?
+SQL:
+SELECT MAX(Fare) FROM titanic
+---
 Question: Show me passengers who paid more than 100 fare and survived?
 SQL:
 SELECT 

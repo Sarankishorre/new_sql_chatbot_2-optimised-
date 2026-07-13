@@ -20,11 +20,7 @@ from langsmith.run_helpers import trace
 
 load_dotenv()
 
-# LangSmith reads LANGCHAIN_TRACING_V2, LANGCHAIN_API_KEY, LANGCHAIN_PROJECT
-# from the environment automatically — just make sure they're in your .env:
-# LANGCHAIN_TRACING_V2=true
-# LANGCHAIN_API_KEY=your_key
-# LANGCHAIN_PROJECT=titanic-sql-assistant
+
 
 # step 1 — load data into SQLite
 print("creating a sqlite database and loading the data")
@@ -35,18 +31,33 @@ conn.commit()
 print("data is loaded into db")
 
 # step 2 — build schema descriptions
+col_description = {
+    "Age": "Represents how old each passenger was, in years. Relevant for questions about oldest, youngest, elderly, senior, minors, children, or age comparisons.",
+    "Fare": "The ticket price paid by each passenger. Relevant for questions about rich, poor, expensive, cheap, wealthy, or cost comparisons.",
+    "Sex": "The gender of each passenger, male or female. Relevant for questions about men, women, gender splits.",
+    "Pclass": "The passenger's ticket class (1st, 2nd, 3rd). Relevant for questions about class, cabin tier, first class, economy.",
+    "SibSp": "Number of siblings or spouses aboard with the passenger. Relevant for questions about family size, siblings, spouses.",
+    "Parch": "Number of parents or children aboard with the passenger. Relevant for questions about family, parents, children traveling together.",
+    "Survived": "Whether the passenger survived (1) or died (0). Relevant for questions about survivors, deaths, casualties, fatalities.",
+    "Embarked": "The port where the passenger boarded (S=Southampton, C=Cherbourg, Q=Queenstown). Relevant for questions about boarding location, port.",
+}
 def build_schema(df, col):
     col_values = df[col]
     dtype = str(col_values.dtype)
 
     if col_values.nunique() <= 12:
         values = sorted(col_values.dropna().unique().tolist())
-        return f"column: {col}, dtype: {dtype}, unique values: {values}"
+        desc= f"column: {col}, dtype: {dtype}, unique values: {values}"
     elif dtype in ["int64", "float64"]:
-        return f"column: {col}, dtype: {dtype}, min: {col_values.min()}, max: {col_values.max()}, mean: {col_values.mean():.2f}"
+        desc= f"column: {col}, dtype: {dtype}, min: {col_values.min()}, max: {col_values.max()}, mean: {col_values.mean():.2f}"
     else:
         sample = col_values.dropna().sample(min(5, len(col_values)), random_state=42).tolist()
-        return f"column: {col}, dtype: {dtype}, sample values: {sample}"
+        desc= f"column: {col}, dtype: {dtype}, sample values: {sample}"
+    description=col_description.get(col,"")
+    if description:
+        desc+=f".{description}"
+    print("schema building is done")
+    return desc
 
 schema = {col: build_schema(df, col) for col in df.columns}
 column_dtypes = {col: str(df[col].dtype) for col in df.columns}
@@ -96,6 +107,7 @@ def standalone_question(query: str, history: list[dict]) -> str:
         temperature=0,
         reasoning_effort="medium"
     )
+    print("standalone question:",response.choices[0].message.content.strip())
     return response.choices[0].message.content.strip()
 
 
@@ -143,15 +155,19 @@ collections.add(ids=cols, documents=descriptions, embeddings=embeddings)
 print("embedded and stored in chromadb")
 
 # step 4b — keyword + semantic retrieval
+def tokenize(text):
+    # strip punctuation so "['female'," tokenizes as "female"
+    return re.findall(r"[a-z0-9]+", text.lower())
+
 all_chunks = collections.get()
-tokenized_docs = [doc.lower().split() for doc in all_chunks['documents']]
+tokenized_docs = [tokenize(doc) for doc in all_chunks['documents']]
 bm25 = BM25Okapi(tokenized_docs)
 col_ids = all_chunks["ids"]
 
 # NOT traced individually — these are cheap, sub-steps of final_schema_ranking,
 # which IS traced below. Tracing every sub-call here would clutter the tree.
 def keyword_search(query, top_k=5):
-    query_tokens = query.lower().split()
+    query_tokens = tokenize(query)
     scores = bm25.get_scores(query_tokens)
     top_indices = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:top_k]
     return [col_ids[i] for i in top_indices]
@@ -232,23 +248,49 @@ no explanation, no markdown code fences, no text before or after.
   "aggregate": "AVG" | "SUM" | "COUNT" | "MIN" | "MAX" | "RATE" | null,
   "column": "<column being aggregated, or '*' for row lookups>",
   "table": "titanic",
-  "filters": [
-    {{"column": "<col>", "operator": "=|>|<|>=|<=|!=|LIKE", "value": "<value>"}}
+  "filter_groups": [
+    {{
+      "logic": "AND" | "OR",
+      "conditions": [
+        {{"column": "<col>", "operator": "=|>|<|>=|<=|!=|LIKE", "value": "<value>"}}
+      ]
+    }}
   ],
   "rate_target": {{"column": "<col>", "operator": "=|>|<|>=|<=|!=", "value": "<value>"}} | null,
-  "logic": "AND" | "OR",
   "group_by": "<column>" | null,
   "having": {{"column": "<col>", "aggregate": "<agg>", "operator": "<op>", "value": "<val>"}} | null,
   "order_by": {{"column": "<col>", "direction": "ASC" | "DESC"}} | null,
   "limit": <int> | null,
   "distinct": true | false
 }}
-
+FILTER GROUPS RULE:
+- Each item in "filter_groups" is one bracketed condition group.
+- Conditions WITHIN a group combine using that group's own "logic".
+- Groups ALWAYS combine with AND between each other, regardless of each group's internal logic.
+- Put a single required condition in its own group with "logic": "AND".
+- Put mutually exclusive alternatives (e.g. "class 1 or 2") together in one group with "logic": "OR".
+Example:
+Question: "male passengers in first or second class who survived"
+Output: {{
+  "aggregate": "COUNT", "column": "*", "table": "titanic",
+  "filter_groups": [
+    {{"logic": "AND", "conditions": [{{"column": "Sex", "operator": "=", "value": "male"}}]}},
+    {{"logic": "OR", "conditions": [
+        {{"column": "Pclass", "operator": "=", "value": "1"}},
+        {{"column": "Pclass", "operator": "=", "value": "2"}}
+    ]}},
+    {{"logic": "AND", "conditions": [{{"column": "Survived", "operator": "=", "value": "1"}}]}}
+  ],
+  "rate_target": null, "group_by": null, "having": null,
+  "order_by": null, "limit": null, "distinct": false
+}}
 STRICT RULES:
+-"Who"/"which passenger" questions want the actual row (use order_by + limit), not an aggregate — even with words like "highest"/"oldest".
 - Use ONLY columns listed below. Never use a column not listed, even if you know it exists in a typical Titanic dataset.
 - If the question mentions gender (male, female, men, women), you MUST filter on Sex if it appears below.
 - Every comparison/condition in the question (e.g. "above 20", "at least", "under") MUST produce a corresponding entry in "filters". Do not silently drop a condition.
 - If a needed column isn't listed, set "column" to null and don't invent a substitute filter.
+
 - RATE queries: if the question asks for a "rate", "percentage", "proportion", or "ratio" of some outcome
   (e.g. "rate of passengers survived", "% of male passengers who survived"), set "aggregate" to "RATE".
   Put the OUTCOME condition (e.g. Survived = 1) in "rate_target", NOT in "filters". Put any population-
@@ -301,14 +343,20 @@ NUMERIC_HINT_PATTERN = re.compile(
     r"\b(above|below|over|under|greater than|less than|at least|at most|more than|fewer than)\b\s*(\d+)|(\d+)\s*(or more|or less|or older|or younger)",
     re.IGNORECASE
 )
+GENDER_PATTERN = re.compile(r"\b(male|female|men|women|man|woman)\b", re.IGNORECASE)
+CLASS_PATTERN = re.compile(r"\b(first|second|third)\s*class\b", re.IGNORECASE)
+SURVIVAL_PATTERN = re.compile(r"\b(survived|survivor|survivors|died|dead|perished|alive)\b", re.IGNORECASE)
 
 # NOT traced — deterministic validation logic, no LLM call
 def validate_intent(intent: dict, user_question: str, valid_columns: list[str]) -> list[str]:
     errors = []
-    referenced_cols = set()
+    all_conditions = [
+        f for group in (intent.get("filter_groups") or []) for f in group["conditions"]
+    ]
+    referenced_cols = set()#take out the column present in all the filters
     if intent.get("column") and intent["column"] != "*":
         referenced_cols.add(intent["column"])
-    for f in intent.get("filters") or []:
+    for f in all_conditions:
         referenced_cols.add(f["column"])
     if intent.get("group_by"):
         referenced_cols.add(intent["group_by"])
@@ -319,32 +367,55 @@ def validate_intent(intent: dict, user_question: str, valid_columns: list[str]) 
     if intent.get("rate_target"):
         referenced_cols.add(intent["rate_target"]["column"])
 
-    for col in referenced_cols:
+    for col in referenced_cols:#check if the column name is right
         if col not in valid_columns:
             errors.append(f"Column '{col}' does not exist in the schema. Valid columns: {valid_columns}")
 
-    if intent.get("aggregate") == "RATE" and not intent.get("rate_target"):
+    if intent.get("aggregate") == "RATE" and not intent.get("rate_target"):#if the aggregate is rate then the rate_target must be present
         errors.append("aggregate is 'RATE' but 'rate_target' is missing — add the outcome condition there.")
 
-    for f in intent.get("filters") or []:
-        col, op = f["column"], f["operator"]
+    for f in all_conditions:
+        col, op = f["column"], f["operator"] #make sure the right operations are mapped to the right columns
         if col in column_dtypes and op in (">", "<", ">=", "<="):
             if column_dtypes[col] not in ("int64", "float64"):
                 errors.append(
                     f"Filter uses numeric operator '{op}' on non-numeric column '{col}' (dtype={column_dtypes[col]})."
                 )
-
-    if NUMERIC_HINT_PATTERN.search(user_question):
-        has_numeric_filter = any(
-            f["operator"] in (">", "<", ">=", "<=") for f in (intent.get("filters") or [])
-        )
-        if not has_numeric_filter:
+ 
+    if NUMERIC_HINT_PATTERN.search(user_question):#any word in user ques matches  the words in numeric pattern
+        has_numeric_filter = any(f["operator"] in (">", "<", ">=", "<=") for f in all_conditions)
+        if not has_numeric_filter: #check any operator is present for this numeric question
             errors.append(
                 "The question contains a numeric comparison (e.g. 'above 20') but no matching "
-                "comparison filter (>, <, >=, <=) was found in 'filters'. Add it."
+                "comparison filter (>, <, >=, <=) was found in 'filter_groups'. Add it."
             )
-
+    if GENDER_PATTERN.search(user_question):
+        has_sex_filter = any(f["column"] == "Sex" for f in all_conditions)
+        if not has_sex_filter and intent.get("group_by") != "Sex":
+            errors.append(
+                "The question mentions gender (male/female/men/women) but no 'Sex' condition "
+                "was found in 'filter_groups'. Add it."
+            )
+ 
+    if CLASS_PATTERN.search(user_question):
+        has_class_filter = any(f["column"] == "Pclass" for f in all_conditions)
+        if not has_class_filter and intent.get("group_by") != "Pclass":
+            errors.append(
+                "The question mentions a specific class (first/second/third) but no 'Pclass' "
+                "condition was found in 'filter_groups'. Add it."
+            )
+ 
+    if SURVIVAL_PATTERN.search(user_question):
+        has_survived_filter = any(f["column"] == "Survived" for f in all_conditions)
+        has_survived_rate = intent.get("rate_target") and intent["rate_target"].get("column") == "Survived"
+        if not has_survived_filter and not has_survived_rate:
+            errors.append(
+                "The question mentions survival/death but no 'Survived' condition was found "
+                "in 'filter_groups' or 'rate_target'. Add it."
+            )
+ 
     return errors
+  
 
 
 @traceable(name="classify_intent")
@@ -408,18 +479,24 @@ def fill_sql_template(intent: dict) -> str:
         for j in intent["joins"]:
             slots["joins"] += f" JOIN {j['table']} ON {j['on']}"
 
-    if intent.get("filters"):
-        conditions = []
-        for f in intent["filters"]:
-            col, op, val = f["column"], f["operator"], f["value"]
-            if isinstance(val, str) and not val.replace('.', '', 1).isdigit():
-                val = f"'{val}'"
-            if op.upper() == "LIKE":
-                conditions.append(f"{col} LIKE '%{f['value']}%'")
-            else:
-                conditions.append(f"{col} {op} {val}")
-        logic = intent.get("logic", "AND")
-        slots["where"] = " WHERE " + f" {logic} ".join(conditions)
+    if intent.get("filter_groups"):
+        group_clauses = []
+        for group in intent["filter_groups"]:
+            conds = []
+            for f in group["conditions"]:
+                col, op, val = f["column"], f["operator"], f["value"]
+                if isinstance(val, str) and not val.replace('.', '', 1).isdigit():
+                    val = f"'{val}'"
+                if op.upper() == "LIKE":
+                    conds.append(f"{col} LIKE '%{f['value']}%'")
+                else:
+                    conds.append(f"{col} {op} {val}")
+            group_logic = group.get("logic", "AND")
+            joined = f" {group_logic} ".join(conds)
+            # wrap in parentheses only if the group has more than one condition —
+            # this is what prevents an OR from leaking into the outer AND chain
+            group_clauses.append(f"({joined})" if len(conds) > 1 else joined)
+        slots["where"] = " WHERE " + " AND ".join(group_clauses)
 
     if intent.get("having"):
         h = intent["having"]
@@ -454,8 +531,8 @@ def validate_sql_matches_spec(sql: str, intent: dict) -> list[str]:
             errors.append(f"Spec is RATE but SQL doesn't contain a SUM(CASE...)/COUNT(*) ratio: {sql}")
     elif intent.get("aggregate") and intent["aggregate"].upper() not in sql.upper():
         errors.append(f"SQL is missing aggregate '{intent['aggregate']}' from the spec: {sql}")
-    if intent.get("filters") and "WHERE" not in sql.upper():
-        errors.append(f"Spec has filters but SQL has no WHERE clause: {sql}")
+    if intent.get("filter_groups") and "WHERE" not in sql.upper():
+        errors.append(f"Spec has filter_groups but SQL has no WHERE clause: {sql}")
     return errors
 
 
@@ -477,7 +554,7 @@ def run_pipeline(query: str):
         print("[warning] SQL/spec mismatch:", sql_errors)
 
     print("sql:", sql_command)
-    return intent, sql_command, None
+    return intent, sql_command, None,retrieved_schema_cols
 
 
 def cabin_missing(rows, columns, max_notes=3):
@@ -545,6 +622,51 @@ Do not mention SQL. Do not repeat the raw rows. Just answer naturally."""
     )
     return response.choices[0].message.content.strip()
 
+#here suggestion for follow up questions
+@traceable(name="follow_up_suggestion_llm_call")
+def followup_suggestion(sql,query,schemas,rows,cols,n=3):
+    top_res=rows[:5]
+    schema_text="\n".join(f"-{schema[col]}"for col in schemas)
+    prompt=f"""you are a data analyst  working in the titanic dataset . user asked a question and 
+        now u need to provide follow up question suggestion . so suggest {n} number of short , natural question related
+        to the previous query and answer 
+        Rules
+        -keep the query under 12 words
+        - Only suggest things answerable using these columns (never invent columns)
+    - Make them useful: a drill-down, a comparison, or a related breakdown
+    - Don't repeat the original question
+    - Return ONLY a JSON array of strings, nothing else
+    Available schemas:
+    {schema_text}
+    Generated sql:
+    {sql}
+    returned columns:
+    {cols}
+    previous query:
+    {query}
+    sample rows:
+    {json.dumps(top_res,default=str)}
+    follow up questions (json array)"""
+    response=groq_client.chat.completions.create(
+        model=groq_small_model,
+        messages=[{
+            "role":"user",
+            "content":prompt
+        }],
+        temperature=0,
+         reasoning_effort="low",
+        response_format={"type": "json_object"} if False else None,  # see note below
+    )
+    raw_ans=response.choices[0].message.content.strip()
+    raw_ans = raw_ans.replace("```json", "").replace("```", "").strip()
+    try:
+        follow=json.loads(raw_ans)
+        if isinstance(follow,dict):
+            follow = follow.get("followups", [])
+        return follow[:n]
+    except json.JSONDecodeError:
+        print(f"[warning] could not parse followups: {raw_ans}")
+        return []
 
 # step 7 — FastAPI app
 
@@ -609,7 +731,7 @@ def process_query(question: str, history: list[dict]):
         }
 
     standalone_query = standalone_question(question, history)
-    intent, sql_command, guardrail2 = run_pipeline(standalone_query)
+    intent, sql_command, guardrail2,retrieved_schemas= run_pipeline(standalone_query)
     if guardrail2:
         history.append({"question": question, "sql": None, "tables": [], "result_summary": guardrail2})
         return {
@@ -625,6 +747,7 @@ def process_query(question: str, history: list[dict]):
     missed_value_msg = cabin_missing(rows, columns)
     if missed_value_msg:
         description = description + "\n\n" + missed_value_msg
+    suggestion_ques=followup_suggestion(sql_command,standalone_query,retrieved_schemas,rows,columns)
 
     history.append({
         "question": question,
@@ -637,7 +760,9 @@ def process_query(question: str, history: list[dict]):
         "description": description,
         "sql": sql_command,
         "rows": rows,
+        "suggested_ques":suggestion_ques,
         "history": history
+        
     }
 
 
