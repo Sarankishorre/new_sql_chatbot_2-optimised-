@@ -135,7 +135,8 @@ No explanation. No punctuation. Just the word.
 
 Question: {query}"""
         }],
-        temperature=0.3
+        temperature=0,
+        reasoning_format="hidden"
 
     )
     result = response.choices[0].message.content.strip().lower()
@@ -330,7 +331,7 @@ Valid columns: {list(schema.keys())}"""
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_question}
         ],
-        temperature=0.2,
+        temperature=0,
         response_format={"type": "json_object"}
     )
 
@@ -625,7 +626,8 @@ Sample rows (up to 5): {json.dumps(preview, default=str)}
 Write a short, plain-English 1-3 sentence answer to the question based on this data.
 Do not mention SQL. Do not repeat the raw rows. Just answer naturally."""
         }],
-        temperature=0.3
+        temperature=0,
+        reasoning_format="hidden"
     )
     return response.choices[0].message.content.strip()
 
@@ -726,7 +728,7 @@ def process_query(question: str, history: list[dict]):
             model=groq_model,
             messages=[{"role": "user", "content": f"""you are a titanic dataset expert and you need to explain about the questions related to the titanic dataset such as questions related to the columns present
                        or anything bounded inside the titanic dataset .
-                       using the information provided  
+                       using the information provided  in 2-3 lines
                        schema description- {schema}
                        If the question is unrelated to the Titanic or this dataset, or too vague/ambiguous
                         to answer (e.g. missing context, unclear pronouns like "they"/"it" with nothing to
@@ -735,7 +737,9 @@ def process_query(question: str, history: list[dict]):
                         Otherwise, answer briefly and naturally.
                         Question: {question}
  
-                       """}]
+                       """}],
+                       temperature=0.2,
+                       reasoning_format="hidden"
         )
         description = resp.choices[0].message.content.strip()
         history.append({"question": question,"tables": [], "result_summary": description})
