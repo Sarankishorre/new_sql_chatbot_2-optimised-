@@ -70,7 +70,7 @@ groq_model = os.getenv("GROQ_MODEL")
 groq_api_key = os.getenv("GROQ_API_KEY")
 groq_client = Groq(api_key=groq_api_key)
 
-groq_small_model = os.getenv("groq_model2")
+
 
 DESTRUCTIVE_PATTERN = re.compile(
     r"\b(delete|remove|drop|update|modify|change|insert|add|alter|truncate|mark)\b"
@@ -104,10 +104,10 @@ def standalone_question(query: str, history: list[dict]) -> str:
     If already standalone, return unchanged.
     return only the rewritten question nothing else"""
     response = groq_client.chat.completions.create(
-        model=groq_small_model,
+        model=groq_model,
         messages=[{"role": "user", "content": prompt}],
         temperature=0,
-        reasoning_effort="medium"
+        reasoning_effort="low"
     )
     print("standalone question:",response.choices[0].message.content.strip())
     return response.choices[0].message.content.strip()
@@ -116,7 +116,7 @@ def standalone_question(query: str, history: list[dict]) -> str:
 @traceable(name="classify_query", run_type="llm")
 def classify_query(query):
     response = groq_client.chat.completions.create(
-        model=groq_small_model,
+        model=groq_model,
         messages=[{
             "role": "user",
             "content": f"""Classify this question as either 'sql' or 'general'.
@@ -202,7 +202,7 @@ def hint_columns_from_query(query: str, all_columns: list[str]) -> list[str]:
 
 
 @traceable(name="final_schema_ranking", run_type="retriever")
-def final_schema_ranking(query, top_k=7):
+def final_schema_ranking(query, top_k=5):
     semantic_ranks = semantic(query)
     keyword_ranks = keyword_search(query)
     fused = rrf_fuse(semantic_ranks, keyword_ranks)
@@ -227,7 +227,7 @@ few_shot_collection.add(ids=ids, documents=questions, embeddings=embeddings)
 
 
 @traceable(name="get_few_shot_examples", run_type="retriever")
-def get_few_shot_examples(query, top_k=3):
+def get_few_shot_examples(query, top_k=2):
     query_embeddings = embed_model.encode(query).tolist()
     results = few_shot_collection.query(query_embeddings=[query_embeddings], n_results=top_k)
     blocks = []
@@ -240,13 +240,6 @@ def get_few_shot_examples(query, top_k=3):
 # intent classification prompt — NOT traced, pure string building
 def build_intent_prompt(retrieved_schema: list[str], examples, error_feedback: str = "") -> str:
     schema_text = "\n".join(f"- {schema[col]}" for col in retrieved_schema)
-    error_block = ""
-    if error_feedback:
-        error_block = f"""
-IMPORTANT — your previous attempt was invalid:
-{error_feedback}
-Fix this in your next answer.
-"""
     return f"""You are an intent classifier for a SQL chatbot querying the titanic table.
 Extract the user's question into this exact JSON structure. Respond with ONLY the JSON —
 no explanation, no markdown code fences, no text before or after.
@@ -308,12 +301,10 @@ STRICT RULES:
   "filters": [{{"column": "Age", "operator": ">", "value": "20"}}],
   "rate_target": {{"column": "Survived", "operator": "=", "value": "1"}},
   "logic": "AND", "group_by": "Sex", "having": null, "order_by": null, "limit": null, "distinct": false}}
-{error_block}
 Available columns:
 {schema_text}
 Examples to understand the query and the appropriate answer:
 {examples}
-
 Example:
 Available columns: Age, Sex, Survived, Fare
 Question: "rate of male survivors sorted by fare"
@@ -321,8 +312,18 @@ Output: {{"aggregate": "COUNT", "column": "Age", "table": "titanic", "filters": 
 """
 
 @traceable(name="call_llm_for_intent", run_type="llm")
-def call_llm_for_intent(user_question: str, retrieved_schema: list[str], examples, error_feedback: str = "") -> dict:
-    system_prompt = build_intent_prompt(retrieved_schema, examples, error_feedback)
+def call_llm_for_intent(user_question: str, retrieved_schema: list[str], examples, error_feedback: str = "", previous_intent: dict = None) -> dict:
+    if error_feedback and previous_intent:
+        system_prompt = f"""your previous JSON output was invalid:
+{json.dumps(previous_intent)}
+
+Fix only these issues and return corrected JSON matching the same schema.
+Errors found:
+{error_feedback}
+
+Valid columns: {list(schema.keys())}"""
+    else:
+        system_prompt = build_intent_prompt(retrieved_schema, examples, error_feedback)
 
     response = groq_client.chat.completions.create(
         model=groq_model,
@@ -331,7 +332,7 @@ def call_llm_for_intent(user_question: str, retrieved_schema: list[str], example
             {"role": "user", "content": user_question}
         ],
         temperature=0,
-        reasoning_effort="none",
+        reasoning_effort="medium",
         response_format={"type": "json_object"}
     )
 
@@ -344,7 +345,6 @@ def call_llm_for_intent(user_question: str, retrieved_schema: list[str], example
         raise ValueError(f"LLM did not return valid JSON: {raw_text}")
     print(intent)
     return intent
-
 #even tho we give the description to the llm , but if we mention female passengers the llm may forgot to add sex column
 NUMERIC_HINT_PATTERN = re.compile(
     r"\b(above|below|over|under|greater than|less than|at least|at most|more than|fewer than)\b\s*(\d+)|(\d+)\s*(or more|or less|or older|or younger)",
@@ -420,7 +420,7 @@ def validate_intent(intent: dict, user_question: str, valid_columns: list[str]) 
                 "The question mentions survival/death but no 'Survived' condition was found "
                 "in 'filter_groups' or 'rate_target'. Add it."
             )
- 
+
     return errors
   
 
@@ -431,7 +431,11 @@ def classify_intent(user_question: str, retrieved_schema: list[str], examples, m
     last_intent = None
 
     for attempt in range(max_retries + 1):
-        intent = call_llm_for_intent(user_question, retrieved_schema, examples, error_feedback)
+        intent = call_llm_for_intent(
+            user_question, retrieved_schema, examples,
+            error_feedback=error_feedback,
+            previous_intent=last_intent
+        )
         last_intent = intent
 
         errors = validate_intent(intent, user_question, retrieved_schema)
@@ -443,7 +447,6 @@ def classify_intent(user_question: str, retrieved_schema: list[str], examples, m
 
     print(f"[warning] returning intent with unresolved validation issues: {error_feedback}")
     return last_intent
-
 # generating sql using the intent — NOT traced, deterministic template filling
 SQL_TEMPLATE = "SELECT {select} FROM {table}{joins}{where}{group_by}{having}{order_by}{limit}"
 
@@ -612,7 +615,7 @@ def build_result_summary(rows: list, columns: list, max_rows: int = 5) -> str:
 def summarize_result(question: str, sql: str, rows: list, columns: list) -> str:
     preview = rows[:5]
     response = groq_client.chat.completions.create(
-        model=groq_small_model,
+        model=groq_model,
         messages=[{
             "role": "user",
             "content": f"""Question: {question}
@@ -655,7 +658,7 @@ def followup_suggestion(sql,query,schemas,rows,cols,n=3):
     {json.dumps(top_res,default=str)}
     follow up questions (json array)"""
     response=groq_client.chat.completions.create(
-        model=groq_small_model,
+        model=groq_model,
         messages=[{
             "role":"user",
             "content":prompt
@@ -724,7 +727,7 @@ def process_query(question: str, history: list[dict]):
 
     if category == "general":
         resp = groq_client.chat.completions.create(
-            model=groq_small_model,
+            model=groq_model,
             messages=[{"role": "user", "content": f"""you are a titanic dataset expert and you need to explain about the questions related to the titanic dataset such as questions related to the columns present
                        or anything bounded inside the titanic dataset .
                        using the information provided  
@@ -810,4 +813,4 @@ def query_endpoint(payload: QueryRequest):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=8001)

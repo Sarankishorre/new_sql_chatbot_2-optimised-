@@ -7,3 +7,5 @@ chromadb
 groq
 python-dotenv
 pydantic
+langsmith
+rank-bm25
