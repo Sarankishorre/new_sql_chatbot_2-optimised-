@@ -100,7 +100,7 @@ def standalone_question(query: str, history: list[dict]) -> str:
     prompt = f"""conversation history:{context}
     new question:{query}
     Rewrite the new message as a fully standalone question, resolving pronouns
-    or references to previous turns (e.g. "that", "their", "what about X").
+    or references to previous turns (e.g. "that", "their", "what about X","where are they").
     If already standalone, return unchanged.
     return only the rewritten question nothing else"""
     response = groq_client.chat.completions.create(
@@ -230,6 +230,7 @@ def get_few_shot_examples(query, top_k=3):
     for ids_str in results["ids"][0]:
         ex = FEW_SHOT_EXAMPLES[int(ids_str)]
         blocks.append(f"Question: {ex['question']}\nSQL:\n{ex['sql']}")
+        print(f"the top k few shot examples are :{blocks}")
     return "\n---\n".join(blocks)
 
 # intent classification prompt — NOT traced, pure string building
@@ -340,7 +341,7 @@ def call_llm_for_intent(user_question: str, retrieved_schema: list[str], example
     print(intent)
     return intent
 
-
+#even tho we give the description to the llm , but if we mention female passengers the llm may forgot to add sex column
 NUMERIC_HINT_PATTERN = re.compile(
     r"\b(above|below|over|under|greater than|less than|at least|at most|more than|fewer than)\b\s*(\d+)|(\d+)\s*(or more|or less|or older|or younger)",
     re.IGNORECASE
@@ -720,7 +721,18 @@ def process_query(question: str, history: list[dict]):
     if category == "general":
         resp = groq_client.chat.completions.create(
             model=groq_small_model,
-            messages=[{"role": "user", "content": f"Answer briefly: {question}"}]
+            messages=[{"role": "user", "content": f"""you are a titanic dataset expert and you need to explain about the questions related to the titanic dataset such as questions related to the columns present
+                       or anything bounded inside the titanic dataset .
+                       using the information provided  
+                       schema description- {schema}
+                       If the question is unrelated to the Titanic or this dataset, or too vague/ambiguous
+                        to answer (e.g. missing context, unclear pronouns like "they"/"it" with nothing to
+                        resolve them), respond with EXACTLY this and nothing else:
+                        "I can only answer questions about the Titanic passengers in this dataset — things like age, sex, fare, class, survival, and family aboard. Could you rephrase your question around that?"
+                        Otherwise, answer briefly and naturally.
+                        Question: {question}
+ 
+                       """}]
         )
         description = resp.choices[0].message.content.strip()
         history.append({"question": question, "sql": None, "tables": [], "result_summary": description})
