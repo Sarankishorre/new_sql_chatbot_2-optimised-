@@ -15,6 +15,10 @@ FROM titanic
 GROUP BY Pclass
 ORDER BY Pclass
 ---
+Question:Give me complete details of female passengers over 60 who survived
+SQL:
+SELECT * FROM titanic WHERE (Sex = 'female' AND Age > 60 AND Survived = 1)
+---
 Question: What is the survival rate for each class?
 SQL:
 SELECT 

@@ -123,6 +123,10 @@ def classify_query(query):
 
 'sql' = questions that need data from the Titanic dataset
 Examples: counts, averages, lists, filters, rates, comparisons, top N, survival stats
+"give me full/complete details of X", "show me everything about X", "list all information about X"
+— any request for actual passenger records or row-level data counts as 'sql', even without
+an aggregate word like count/average.
+
 
 'general' = factual or explanation questions that don't need data
 Examples: what is Pclass, explain SibSp, what was the Titanic, what does Fare mean
@@ -711,11 +715,11 @@ def process_query(question: str, history: list[dict]):
         return {
             "success": True,
             "description": description,
-            "sql": None,
+         
             "rows": [],
             "history": history
         }
-
+    standalone_query = standalone_question(question, history)
     category = classify_query(question)
 
     if category == "general":
@@ -735,23 +739,23 @@ def process_query(question: str, history: list[dict]):
                        """}]
         )
         description = resp.choices[0].message.content.strip()
-        history.append({"question": question, "sql": None, "tables": [], "result_summary": description})
+        history.append({"question": question,"tables": [], "result_summary": description})
         return {
             "success": True,
             "description": description,
-            "sql": None,
+         
             "rows": [],
             "history": history
         }
 
-    standalone_query = standalone_question(question, history)
+    
     intent, sql_command, guardrail2,retrieved_schemas= run_pipeline(standalone_query)
     if guardrail2:
         history.append({"question": question, "sql": None, "tables": [], "result_summary": guardrail2})
         return {
             "success": True,
             "description": guardrail2,
-            "sql": None,
+         
             "rows": [],
             "history": history
         }
