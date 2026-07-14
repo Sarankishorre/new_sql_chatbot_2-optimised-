@@ -186,32 +186,59 @@ function toggleTable(btn) {
 }
 
 async function sendQuery(question) {
-  // Add user message
   addMessage('user', question);
-  
+
   const payload = {
     question: question,
     history: history
   };
 
+  const streamDiv = document.createElement('div');
+  streamDiv.className = 'flex justify-start';
+  streamDiv.innerHTML = `<div class="message-bubble"><div class="bg-gray-800 rounded-3xl px-6 py-4" id="streaming-text"></div></div>`;
+  chatContainer.appendChild(streamDiv);
+  const textEl = streamDiv.querySelector('#streaming-text');
+  chatContainer.scrollTop = chatContainer.scrollHeight;
+
   try {
     const API_URL = "https://matha-rubbly-sigrid.ngrok-free.dev";
-    const res = await fetch(`${API_URL}/query`, {
+    const res = await fetch(`${API_URL}/query-stream`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload)
     });
 
-    const data = await res.json();
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let finalData = null;
 
-    if (data.success) {
-      history = data.history || [];
-      addMessage('assistant', data.description, data.sql, data.rows, data.suggested_ques);
- 
-    } else {
-      addMessage('assistant', `❌ Error: ${data.error || 'Something went wrong'}`);
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop();
+
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        const event = JSON.parse(line);
+        if (event.type === 'chunk') {
+          textEl.textContent += event.text;
+          chatContainer.scrollTop = chatContainer.scrollHeight;
+        } else if (event.type === 'final') {
+          finalData = event;
+        }
+      }
+    }
+
+    streamDiv.remove();
+    if (finalData) {
+      history = finalData.history || [];
+      addMessage('assistant', finalData.description, finalData.sql, finalData.rows, finalData.suggested_ques);
     }
   } catch (err) {
+    streamDiv.remove();
     addMessage('assistant', `❌ Connection error: ${err.message}`);
   }
 }
