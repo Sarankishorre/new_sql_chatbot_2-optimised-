@@ -199,6 +199,12 @@ Question: What are the different embarkation ports in the dataset?
 SQL:
 SELECT DISTINCT Embarked FROM titanic WHERE Embarked IS NOT NULL
 ---
+Question: Give me their name and cabin
+SQL:
+SELECT Name, Cabin
+FROM titanic
+WHERE Survived = 1
+---
 Question: What age groups exist in this dataset?
 SQL:
 SELECT DISTINCT Age_group FROM titanic

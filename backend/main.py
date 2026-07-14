@@ -102,7 +102,9 @@ def standalone_question(query: str, history: list[dict]) -> str:
     new question:{query}
     Rewrite the new message as a fully standalone question, resolving pronouns
     or references to previous turns (e.g. "that", "their", "what about X","where are they").
-    If already standalone, return unchanged.
+    Also correct any grammar, spelling, or phrasing issues so the question reads naturally
+    and clearly, without changing its meaning or intent.
+    If already standalone and grammatically correct, return unchanged.
     return only the rewritten question nothing else"""
     response = groq_client.chat.completions.create(
         model=groq_small_model,
@@ -193,13 +195,47 @@ def rrf_fuse(list1, list2, k=60):
         scores[item] = scores.get(item, 0) + 1 / (k + rank)
     return sorted(scores.items(), key=lambda x: -x[1])
 
+COLUMN_SYNONYMS = {
+    "Age": ["age", "old", "young", "younger", "older", "oldest", "youngest", "elderly", "senior", "minor", "child", "children", "kid", "kids", "infant", "adult"],
+    "Fare": ["fare", "price", "cost", "paid", "ticket price", "expensive", "cheap", "rich", "poor", "wealthy", "wealth"],
+    "Sex": ["sex", "gender", "male", "female", "men", "women", "man", "woman", "boys", "girls"],
+    "Pclass": ["class", "pclass", "ticket class", "first class", "second class", "third class", "cabin tier", "economy"],
+    "SibSp": ["sibsp", "sibling", "siblings", "spouse", "spouses", "brother", "sister", "husband", "wife"],
+    "Parch": ["parch", "parent", "parents", "children", "child", "kids", "family", "families"],
+    "Survived": ["survived", "survival", "survivor", "survivors", "died", "death", "deaths", "dead", "alive", "perished", "casualty", "casualties", "fatality", "fatalities"],
+    "Embarked": ["embarked", "embark", "boarded", "boarding", "port", "southampton", "cherbourg", "queenstown"],
+    "Name": ["name", "names", "named", "who is", "who was"],
+    "Cabin": ["cabin", "cabins", "room", "deck", "berth"],
+    "PassengerId": ["passenger id", "passengerid", "id number"],
+    "Ticket": ["ticket number", "ticket id"],
+}
+
+
 def hint_columns_from_query(query: str, all_columns: list[str]) -> list[str]:
     q = query.lower()
     hits = []
+
+    # 1. exact column name match (existing logic)
     for col in all_columns:
         pattern = r"\b" + re.escape(col.lower()) + r"\b"
         if re.search(pattern, q):
             hits.append(col)
+
+    # 2. synonym match — catches phrasing that doesn't literally name the column
+    for col, synonyms in COLUMN_SYNONYMS.items():
+        if col in all_columns and col not in hits:
+            for synonym in synonyms:
+                if " " in synonym:
+                    # multi-word phrase — plain substring check
+                    if synonym in q:
+                        hits.append(col)
+                        break
+                else:
+                    # single word — word-boundary match to avoid partial matches
+                    if re.search(r"\b" + re.escape(synonym) + r"\b", q):
+                        hits.append(col)
+                        break
+
     return hits
 
 
@@ -293,6 +329,10 @@ STRICT RULES:
 - Every comparison/condition in the question (e.g. "above 20", "at least", "under") MUST produce a corresponding entry in "filters". Do not silently drop a condition.
 - If a needed column isn't listed, set "column" to null and don't invent a substitute filter.
 
+- If the user asks for specific named columns (e.g. "name and cabin", "show me age and fare"),
+  set "column" to a comma-separated string of those exact column names, e.g. "Name, Cabin".
+  Only use "*" when the user asks for "complete/full details" WITHOUT naming specific columns.
+
 - RATE queries: if the question asks for a "rate", "percentage", "proportion", or "ratio" of some outcome
   (e.g. "rate of passengers survived", "% of male passengers who survived"), set "aggregate" to "RATE".
   Put the OUTCOME condition (e.g. Survived = 1) in "rate_target", NOT in "filters". Put any population-
@@ -307,11 +347,8 @@ Available columns:
 {schema_text}
 Examples to understand the query and the appropriate answer:
 {examples}
-Example:
-Available columns: Age, Sex, Survived, Fare
-Question: "rate of male survivors sorted by fare"
-Output: {{"aggregate": "COUNT", "column": "Age", "table": "titanic", "filters": [{{"column": "Sex", "operator": "=", "value": "male"}}, {{"column": "Survived", "operator": "=", "value": "1"}}], "logic": "AND", "group_by": null, "having": null, "order_by": {{"column": "Fare", "direction": "ASC"}}, "limit": null, "distinct": false}}
-"""
+IMPORTANT: Respond with ONLY the JSON object described above. Do not include any
+explanation, reasoning, markdown code fences, or text before or after the JSON."""
 
 @traceable(name="call_llm_for_intent", run_type="llm")
 def call_llm_for_intent(user_question: str, retrieved_schema: list[str], examples, error_feedback: str = "", previous_intent: dict = None) -> dict:
@@ -323,7 +360,8 @@ Fix only these issues and return corrected JSON matching the same schema.
 Errors found:
 {error_feedback}
 
-Valid columns: {list(schema.keys())}"""
+Valid columns: {list(schema.keys())}
+Respond with ONLY the JSON object. No explanation, no markdown code fences, no text before or after."""
     else:
         system_prompt = build_intent_prompt(retrieved_schema, examples, error_feedback)
 
@@ -333,8 +371,9 @@ Valid columns: {list(schema.keys())}"""
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_question}
         ],
-        temperature=0,
-        response_format={"type": "json_object"}
+        temperature=0.2,
+        max_tokens=1024,
+        reasoning_format="hidden" 
     )
 
     raw_text = response.choices[0].message.content.strip()
@@ -343,9 +382,31 @@ Valid columns: {list(schema.keys())}"""
     try:
         intent = json.loads(raw_text)
     except json.JSONDecodeError:
-        raise ValueError(f"LLM did not return valid JSON: {raw_text}")
+        # fallback: model added extra text around the JSON — extract it manually
+        intent = extract_json_from_text(raw_text)
+        if intent is None:
+            raise ValueError(f"LLM did not return valid JSON: {raw_text}")
+
     print(intent)
     return intent
+def extract_json_from_text(text: str) -> dict | None:
+    """Fallback: find a JSON object embedded in extra text using brace matching."""
+    start = text.find("{")
+    if start == -1:
+        return None
+    depth = 0
+    for i in range(start, len(text)):
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+            if depth == 0:
+                candidate = text[start:i + 1]
+                try:
+                    return json.loads(candidate)
+                except json.JSONDecodeError:
+                    return None
+    return None
 #even tho we give the description to the llm , but if we mention female passengers the llm may forgot to add sex column
 NUMERIC_HINT_PATTERN = re.compile(
     r"\b(above|below|over|under|greater than|less than|at least|at most|more than|fewer than)\b\s*(\d+)|(\d+)\s*(or more|or less|or older|or younger)",
@@ -363,7 +424,8 @@ def validate_intent(intent: dict, user_question: str, valid_columns: list[str]) 
     ]
     referenced_cols = set()#take out the column present in all the filters
     if intent.get("column") and intent["column"] != "*":
-        referenced_cols.add(intent["column"])
+        for col in intent["column"].split(","):
+            referenced_cols.add(col.strip())
     for f in all_conditions:
         referenced_cols.add(f["column"])
     if intent.get("group_by"):
@@ -643,30 +705,26 @@ def followup_suggestion(sql,query,schemas,rows,cols,n=3):
         to the previous query and answer 
         Rules
         -keep the query under 12 words
-        - Only suggest things answerable using these columns (never invent columns)
-    - Make them useful: a drill-down, a comparison, or a related breakdown
-    - Don't repeat the original question
-    - Return ONLY a JSON array of strings, nothing else
-    Available schemas:
-    {schema_text}
-    Generated sql:
-    {sql}
-    returned columns:
-    {cols}
-    previous query:
-    {query}
-    sample rows:
-    {json.dumps(top_res,default=str)}
-    follow up questions (json array)"""
+        -Only suggest things answerable using these columns (never invent columns)
+        - Make them useful: a drill-down, a comparison, or a related breakdown
+        - Don't repeat the original question
+        - Return ONLY a JSON array of strings, nothing else
+        Available schemas:
+        {schema_text}
+        Generated sql:
+        {sql}
+        previous query:
+        {query}
+        sample rows:
+        {json.dumps(top_res,default=str)}
+        follow up questions (json array)"""
     response=groq_client.chat.completions.create(
         model=groq_small_model,
         messages=[{
             "role":"user",
             "content":prompt
         }],
-        temperature=0.3,
-        response_format={"type": "json_object"} if False else None,  # see note below
-    )
+        temperature=0.3)
     raw_ans=response.choices[0].message.content.strip()
     raw_ans = raw_ans.replace("```json", "").replace("```", "").strip()
     try:
@@ -723,7 +781,7 @@ def process_query(question: str, history: list[dict]):
             "history": history
         }
     standalone_query = standalone_question(question, history)
-    category = classify_query(question)
+    category = classify_query(standalone_query)
 
     if category == "general":
         resp = groq_client.chat.completions.create(
@@ -753,8 +811,19 @@ def process_query(question: str, history: list[dict]):
             "history": history
         }
 
-    
-    intent, sql_command, guardrail2,retrieved_schemas= run_pipeline(standalone_query)
+    try:
+        intent, sql_command, guardrail2, retrieved_schemas = run_pipeline(standalone_query)
+    except Exception as e:
+        print(f"[error] run_pipeline failed: {e}")
+        description = "I couldn't quite figure out how to answer that — could you rephrase it more simply?"
+        history.append({"question": question, "sql": None, "tables": [], "result_summary": description})
+        return {
+            "success": True,
+            "description": description,
+            "sql": None,
+            "rows": [],
+            "history": history
+        }
     if guardrail2:
         history.append({"question": question, "sql": None, "tables": [], "result_summary": guardrail2})
         return {
@@ -792,26 +861,26 @@ def process_query(question: str, history: list[dict]):
 @app.post("/query")
 def query_endpoint(payload: QueryRequest):
     question = payload.question
-    history = [msg.dict() for msg in payload.history] if payload.history else []
+    history = [msg.model_dump() for msg in payload.history] if payload.history else []
 
-    # `trace()` context manager lets us attach per-request metadata (tags you
-    # can filter by in the LangSmith UI) that @traceable's decorator syntax
-    # can't set dynamically. Wrap the call so every run in the dashboard is
-    # tagged with the raw question — handy once you add user_id later too.
     try:
         with trace(name="query_endpoint", metadata={"question": question}) as run:
             result = process_query(question, history)
             run.add_metadata({"success": result.get("success", True)})
             return result
     except Exception as e:
-        # Log full error server-side; don't leak internals to the client
+        import traceback
         print(f"[error] /query failed: {e}")
+        print(traceback.format_exc())
+        description = "I had trouble understanding that question. Could you try rephrasing it?"
+        history.append({"question": question, "sql": None, "tables": [], "result_summary": description})
         return {
-            "success": False,
-            "error": "Something went wrong processing your question. Please try again.",
+            "success": True,
+            "description": description,
+            "sql": None,
+            "rows": [],
             "history": history
         }
-
 
 if __name__ == "__main__":
     import uvicorn
