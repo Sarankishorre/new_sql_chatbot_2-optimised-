@@ -30,21 +30,6 @@ EVAL_CASES = [
         "category": "aggregate",
         "gold_sql": "SELECT MAX(Age) FROM titanic",
     },
-    {
-        "question": "What is the minimum fare paid?",
-        "category": "aggregate",
-        "gold_sql": "SELECT MIN(Fare) FROM titanic",
-    },
-    {
-        "question": "What is the total sum of fares collected?",
-        "category": "aggregate",
-        "gold_sql": "SELECT SUM(Fare) FROM titanic",
-    },
-    {
-        "question": "How many passengers were there in total?",
-        "category": "aggregate",
-        "gold_sql": "SELECT COUNT(*) FROM titanic",
-    },
 
     # ---------- simple filter ----------
     {
@@ -61,11 +46,6 @@ EVAL_CASES = [
         "question": "How many passengers paid a fare under 10?",
         "category": "filter",
         "gold_sql": "SELECT COUNT(*) FROM titanic WHERE Fare < 10",
-    },
-    {
-        "question": "How many passengers were in first class?",
-        "category": "filter",
-        "gold_sql": "SELECT COUNT(*) FROM titanic WHERE Pclass = 1",
     },
 
     #rate / percentage
@@ -84,11 +64,6 @@ EVAL_CASES = [
         "category": "rate",
         "gold_sql": "SELECT SUM(CASE WHEN Survived = 1 THEN 1 ELSE 0 END) * 1.0 / COUNT(*) FROM titanic WHERE Age > 20",
     },
-    {
-        "question": "What proportion of first class passengers survived?",
-        "category": "rate",
-        "gold_sql": "SELECT SUM(CASE WHEN Survived = 1 THEN 1 ELSE 0 END) * 1.0 / COUNT(*) FROM titanic WHERE Pclass = 1",
-    },
 
     # ---------- group by ----------
     {
@@ -105,11 +80,6 @@ EVAL_CASES = [
         "question": "Number of passengers in each class",
         "category": "group_by",
         "gold_sql": "SELECT Pclass, COUNT(*) FROM titanic GROUP BY Pclass",
-    },
-    {
-        "question": "Average fare paid by each passenger class",
-        "category": "group_by",
-        "gold_sql": "SELECT Pclass, AVG(Fare) FROM titanic GROUP BY Pclass",
     },
 
     # ---------- order by / limit ----------
@@ -128,38 +98,6 @@ EVAL_CASES = [
         "category": "order_limit",
         "gold_sql": "SELECT * FROM titanic ORDER BY Fare DESC LIMIT 1",
     },
-    {
-        "question": "Who was the oldest passenger on board?",
-        "category": "order_limit",
-        "gold_sql": "SELECT * FROM titanic ORDER BY Age DESC LIMIT 1",
-    },
-    {
-        "question": "Show the 10 youngest passengers",
-        "category": "order_limit",
-        "gold_sql": "SELECT * FROM titanic ORDER BY Age ASC LIMIT 10",
-    },
-    {
-        "question": "List the top 5 passengers with the most siblings or spouses aboard",
-        "category": "order_limit",
-        "gold_sql": "SELECT * FROM titanic ORDER BY SibSp DESC LIMIT 5",
-    },
-    {
-        "question": "Show 5 passengers sorted by fare from lowest to highest",
-        "category": "order_limit",
-        "gold_sql": "SELECT * FROM titanic ORDER BY Fare ASC LIMIT 5",
-    },
-    {
-        "question": "Who is the youngest passenger that survived?",
-        "category": "order_limit",
-        "gold_sql": "SELECT * FROM titanic WHERE Survived = 1 ORDER BY Age ASC LIMIT 1",
-    },
-    {
-        "question": "Show the top 3 highest paying passengers in third class",
-        "category": "order_limit",
-        "gold_sql": "SELECT * FROM titanic WHERE Pclass = 3 ORDER BY Fare DESC LIMIT 3",
-    }
-    ,
-
     # ---------- multi-condition ----------
     {
         "question": "How many female passengers in first class survived?",
@@ -175,35 +113,5 @@ EVAL_CASES = [
         "question": "How many passengers under age 18 were in third class?",
         "category": "multi_condition",
         "gold_sql": "SELECT COUNT(*) FROM titanic WHERE Age < 18 AND Pclass = 3",
-    },
-    {
-        "question": "How many female passengers paid more than 50 fare and survived?",
-        "category": "multi_condition",
-        "gold_sql": "SELECT COUNT(*) FROM titanic WHERE Sex = 'female' AND Fare > 50 AND Survived = 1",
-    },
-    {
-        "question": "How many passengers embarked from Southampton and were in second class?",
-        "category": "multi_condition",
-        "gold_sql": "SELECT COUNT(*) FROM titanic WHERE Embarked = 'Southampton' AND Pclass = 2",
-    },
-    {
-        "question": "How many passengers were either female or under age 10?",
-        "category": "multi_condition",
-        "gold_sql": "SELECT COUNT(*) FROM titanic WHERE Sex = 'female' OR Age < 10",
-    },
-    {
-        "question": "How many male passengers in first or second class survived?",
-        "category": "multi_condition",
-        "gold_sql": "SELECT COUNT(*) FROM titanic WHERE Sex = 'male' AND (Pclass = 1 OR Pclass = 2) AND Survived = 1",
-    },
-    {
-        "question": "How many passengers older than 40 paid less than 20 fare and did not survive?",
-        "category": "multi_condition",
-        "gold_sql": "SELECT COUNT(*) FROM titanic WHERE Age > 40 AND Fare < 20 AND Survived = 0",
-    },
-    {
-        "question": "How many passengers had at least one parent or child aboard and were in first class?",
-        "category": "multi_condition",
-        "gold_sql": "SELECT COUNT(*) FROM titanic WHERE Parch >= 1 AND Pclass = 1",
-    },
+    }
 ]

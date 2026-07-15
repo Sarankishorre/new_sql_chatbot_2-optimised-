@@ -205,6 +205,23 @@ SELECT Name, Cabin
 FROM titanic
 WHERE Survived = 1
 ---
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+0
 Question: What age groups exist in this dataset?
 SQL:
 SELECT DISTINCT Age_group FROM titanic
