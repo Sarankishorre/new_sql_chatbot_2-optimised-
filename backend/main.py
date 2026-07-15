@@ -174,8 +174,6 @@ tokenized_docs = [tokenize(doc) for doc in all_chunks['documents']]
 bm25 = BM25Okapi(tokenized_docs)
 col_ids = all_chunks["ids"]
 
-# NOT traced individually — these are cheap, sub-steps of final_schema_ranking,
-# which IS traced below. Tracing every sub-call here would clutter the tree.
 def keyword_search(query, top_k=5):
     query_tokens = tokenize(query)
     scores = bm25.get_scores(query_tokens)
@@ -214,24 +212,19 @@ COLUMN_SYNONYMS = {
 def hint_columns_from_query(query: str, all_columns: list[str]) -> list[str]:
     q = query.lower()
     hits = []
-
-    # 1. exact column name match (existing logic)
     for col in all_columns:
         pattern = r"\b" + re.escape(col.lower()) + r"\b"
         if re.search(pattern, q):
             hits.append(col)
 
-    # 2. synonym match — catches phrasing that doesn't literally name the column
     for col, synonyms in COLUMN_SYNONYMS.items():
         if col in all_columns and col not in hits:
             for synonym in synonyms:
                 if " " in synonym:
-                    # multi-word phrase — plain substring check
                     if synonym in q:
                         hits.append(col)
                         break
                 else:
-                    # single word — word-boundary match to avoid partial matches
                     if re.search(r"\b" + re.escape(synonym) + r"\b", q):
                         hits.append(col)
                         break
@@ -275,9 +268,46 @@ def get_few_shot_examples(query, top_k=2):
         print(f"the top k few shot examples are :{blocks}")
     return "\n---\n".join(blocks)
 
-# intent classification prompt — NOT traced, pure string building
-def build_intent_prompt(retrieved_schema: list[str], examples, error_feedback: str = "") -> str:
+DERIVED_HINT_PATTERN = re.compile(
+    r"\b(tier|tiers|bucket|bin|categor|classify|group.*by whether|split.*into|"
+    r"cheap|moderate|expensive|whether.*or not|had.*or not)\b",
+    re.IGNORECASE
+)
+
+def needs_derived_column(query: str) -> bool:
+    return bool(DERIVED_HINT_PATTERN.search(query))
+
+
+def build_intent_prompt(retrieved_schema: list[str], examples, error_feedback: str = "", query: str = "") -> str:
     schema_text = "\n".join(f"- {schema[col]}" for col in retrieved_schema)
+
+    derived_block = ""
+    if needs_derived_column(query):
+        derived_block = """
+DERIVED/BINNING RULE:
+- If the question asks to group or classify rows by a condition not stored directly as a column
+  (e.g. "children aboard or not", "fare tiers cheap/moderate/expensive", "age groups"),
+  add a "derived_column" field and set "group_by" to its alias.
+- "derived_column" MUST use exactly this shape — do NOT use "condition"/"label" as key names:
+  "derived_column": {"alias": "<string>", "cases": [{"when": {"column": "<col>", "operator": "=|>|<|>=|<=|!=", "value": "<val>"}, "then": "<label>"}, ...], "else_label": "<string>"} | null
+- "filter_groups" and "rate_target" MUST still follow their normal shapes even when derived_column is used —
+  filter_groups is a list of {"logic": "AND"|"OR", "conditions": [{"column":..., "operator":..., "value":...}]},
+  rate_target is a single {"column":..., "operator":..., "value":...} object, never a bare string.
+Example:
+Question: "Group survivors by whether they had children aboard or not"
+Output: {
+  "aggregate": "COUNT", "column": "*", "table": "titanic",
+  "filter_groups": [{"logic": "AND", "conditions": [{"column": "Survived", "operator": "=", "value": "1"}]}],
+  "derived_column": {
+    "alias": "has_children",
+    "cases": [{"when": {"column": "Parch", "operator": ">", "value": "0"}, "then": "Has Children"}],
+    "else_label": "No Children"
+  },
+  "group_by": "has_children", "rate_target": null, "having": null,
+  "order_by": null, "limit": null, "distinct": false
+}
+"""
+
     return f"""You are an intent classifier for a SQL chatbot querying the titanic table.
 Extract the user's question into this exact JSON structure. Respond with ONLY the JSON —
 no explanation, no markdown code fences, no text before or after.
@@ -343,6 +373,7 @@ STRICT RULES:
   "filters": [{{"column": "Age", "operator": ">", "value": "20"}}],
   "rate_target": {{"column": "Survived", "operator": "=", "value": "1"}},
   "logic": "AND", "group_by": "Sex", "having": null, "order_by": null, "limit": null, "distinct": false}}
+{derived_block}
 Available columns:
 {schema_text}
 Examples to understand the query and the appropriate answer:
@@ -363,7 +394,7 @@ Errors found:
 Valid columns: {list(schema.keys())}
 Respond with ONLY the JSON object. No explanation, no markdown code fences, no text before or after."""
     else:
-        system_prompt = build_intent_prompt(retrieved_schema, examples, error_feedback)
+        system_prompt = build_intent_prompt(retrieved_schema, examples, error_feedback, query=user_question)
 
     response = groq_client.chat.completions.create(
         model=groq_small_model,
@@ -373,7 +404,8 @@ Respond with ONLY the JSON object. No explanation, no markdown code fences, no t
         ],
         temperature=0.2,
         max_tokens=1024,
-        reasoning_format="hidden" 
+        reasoning_format="hidden",
+        reasoning_effort="low"
     )
 
     raw_text = response.choices[0].message.content.strip()
@@ -382,7 +414,6 @@ Respond with ONLY the JSON object. No explanation, no markdown code fences, no t
     try:
         intent = json.loads(raw_text)
     except json.JSONDecodeError:
-        # fallback: model added extra text around the JSON — extract it manually
         intent = extract_json_from_text(raw_text)
         if intent is None:
             raise ValueError(f"LLM did not return valid JSON: {raw_text}")
@@ -407,7 +438,7 @@ def extract_json_from_text(text: str) -> dict | None:
                 except json.JSONDecodeError:
                     return None
     return None
-#even tho we give the description to the llm , but if we mention female passengers the llm may forgot to add sex column
+
 NUMERIC_HINT_PATTERN = re.compile(
     r"\b(above|below|over|under|greater than|less than|at least|at most|more than|fewer than)\b\s*(\d+)|(\d+)\s*(or more|or less|or older|or younger)",
     re.IGNORECASE
@@ -416,45 +447,91 @@ GENDER_PATTERN = re.compile(r"\b(male|female|men|women|man|woman)\b", re.IGNOREC
 CLASS_PATTERN = re.compile(r"\b(first|second|third)\s*class\b", re.IGNORECASE)
 SURVIVAL_PATTERN = re.compile(r"\b(survived|survivor|survivors|died|dead|perished|alive)\b", re.IGNORECASE)
 
-# NOT traced — deterministic validation logic, no LLM call
+
+# ---------------------------------------------------------------------------
+# FIXED: validate_intent no longer crashes on malformed filter_groups,
+# rate_target, or derived_column shapes. Malformed structures are now turned
+# into specific retry-able error strings so classify_intent's retry loop can
+# actually correct them, instead of the whole request throwing a KeyError.
+# ---------------------------------------------------------------------------
 def validate_intent(intent: dict, user_question: str, valid_columns: list[str]) -> list[str]:
     errors = []
-    all_conditions = [
-        f for group in (intent.get("filter_groups") or []) for f in group["conditions"]
-    ]
-    referenced_cols = set()#take out the column present in all the filters
+
+    all_conditions = []
+    for group in (intent.get("filter_groups") or []):
+        if not isinstance(group, dict) or "conditions" not in group or not isinstance(group.get("conditions"), list):
+            errors.append(
+                f"filter_groups entry is malformed — each entry must be "
+                f"{{'logic': 'AND'|'OR', 'conditions': [{{'column':..., 'operator':..., 'value':...}}]}}. Got: {group}"
+            )
+            continue
+        for cond in group["conditions"]:
+            if not isinstance(cond, dict) or "column" not in cond or "operator" not in cond:
+                errors.append(f"filter_groups condition is malformed, must have 'column'/'operator'/'value' keys. Got: {cond}")
+                continue
+            all_conditions.append(cond)
+
+    rate_target = intent.get("rate_target")
+    if rate_target is not None and (not isinstance(rate_target, dict) or "column" not in rate_target):
+        errors.append(
+            f"rate_target must be an object like {{'column':..., 'operator':..., 'value':...}}, "
+            f"not a bare value. Got: {rate_target}"
+        )
+        rate_target = None  # don't let downstream checks crash on it
+
+    derived_column = intent.get("derived_column")
+    if derived_column is not None:
+        if not isinstance(derived_column, dict) or "alias" not in derived_column or "cases" not in derived_column:
+            errors.append(
+                "derived_column must be an object with 'alias', 'cases' (list), and 'else_label' keys."
+            )
+        else:
+            if not isinstance(derived_column.get("cases"), list) or not derived_column["cases"]:
+                errors.append("derived_column.cases must be a non-empty list of {'when':..., 'then':...} objects.")
+            else:
+                for c in derived_column["cases"]:
+                    if not isinstance(c, dict) or "when" not in c or "then" not in c:
+                        errors.append(f"derived_column case is missing required 'when'/'then' keys. Got: {c}")
+                        continue
+                    w = c["when"]
+                    if not isinstance(w, dict) or "column" not in w or "operator" not in w or "value" not in w:
+                        errors.append(f"derived_column case 'when' must have 'column'/'operator'/'value' keys. Got: {w}")
+
+    referenced_cols = set()
     if intent.get("column") and intent["column"] != "*":
         for col in intent["column"].split(","):
             referenced_cols.add(col.strip())
     for f in all_conditions:
         referenced_cols.add(f["column"])
     if intent.get("group_by"):
-        referenced_cols.add(intent["group_by"])
-    if intent.get("order_by"):
+        derived_alias = (intent.get("derived_column") or {}).get("alias") if isinstance(intent.get("derived_column"), dict) else None
+        if intent["group_by"] != derived_alias:
+            referenced_cols.add(intent["group_by"])
+    if intent.get("order_by") and isinstance(intent["order_by"], dict) and "column" in intent["order_by"]:
         referenced_cols.add(intent["order_by"]["column"])
-    if intent.get("having"):
+    if intent.get("having") and isinstance(intent["having"], dict) and "column" in intent["having"]:
         referenced_cols.add(intent["having"]["column"])
-    if intent.get("rate_target"):
-        referenced_cols.add(intent["rate_target"]["column"])
+    if rate_target:
+        referenced_cols.add(rate_target["column"])
 
-    for col in referenced_cols:#check if the column name is right
+    for col in referenced_cols:
         if col not in valid_columns:
             errors.append(f"Column '{col}' does not exist in the schema. Valid columns: {valid_columns}")
 
-    if intent.get("aggregate") == "RATE" and not intent.get("rate_target"):#if the aggregate is rate then the rate_target must be present
-        errors.append("aggregate is 'RATE' but 'rate_target' is missing — add the outcome condition there.")
+    if intent.get("aggregate") == "RATE" and not rate_target:
+        errors.append("aggregate is 'RATE' but 'rate_target' is missing or malformed — add a proper {'column':...,'operator':...,'value':...} object.")
 
     for f in all_conditions:
-        col, op = f["column"], f["operator"] #make sure the right operations are mapped to the right columns
+        col, op = f["column"], f["operator"]
         if col in column_dtypes and op in (">", "<", ">=", "<="):
             if column_dtypes[col] not in ("int64", "float64"):
                 errors.append(
                     f"Filter uses numeric operator '{op}' on non-numeric column '{col}' (dtype={column_dtypes[col]})."
                 )
- 
-    if NUMERIC_HINT_PATTERN.search(user_question):#any word in user ques matches  the words in numeric pattern
+
+    if NUMERIC_HINT_PATTERN.search(user_question):
         has_numeric_filter = any(f["operator"] in (">", "<", ">=", "<=") for f in all_conditions)
-        if not has_numeric_filter: #check any operator is present for this numeric question
+        if not has_numeric_filter:
             errors.append(
                 "The question contains a numeric comparison (e.g. 'above 20') but no matching "
                 "comparison filter (>, <, >=, <=) was found in 'filter_groups'. Add it."
@@ -466,7 +543,7 @@ def validate_intent(intent: dict, user_question: str, valid_columns: list[str]) 
                 "The question mentions gender (male/female/men/women) but no 'Sex' condition "
                 "was found in 'filter_groups'. Add it."
             )
- 
+
     if CLASS_PATTERN.search(user_question):
         has_class_filter = any(f["column"] == "Pclass" for f in all_conditions)
         if not has_class_filter and intent.get("group_by") != "Pclass":
@@ -474,10 +551,10 @@ def validate_intent(intent: dict, user_question: str, valid_columns: list[str]) 
                 "The question mentions a specific class (first/second/third) but no 'Pclass' "
                 "condition was found in 'filter_groups'. Add it."
             )
- 
+
     if SURVIVAL_PATTERN.search(user_question):
         has_survived_filter = any(f["column"] == "Survived" for f in all_conditions)
-        has_survived_rate = intent.get("rate_target") and intent["rate_target"].get("column") == "Survived"
+        has_survived_rate = rate_target and rate_target.get("column") == "Survived"
         if not has_survived_filter and not has_survived_rate:
             errors.append(
                 "The question mentions survival/death but no 'Survived' condition was found "
@@ -485,7 +562,7 @@ def validate_intent(intent: dict, user_question: str, valid_columns: list[str]) 
             )
 
     return errors
-  
+
 
 
 @traceable(name="classify_intent")
@@ -510,8 +587,23 @@ def classify_intent(user_question: str, retrieved_schema: list[str], examples, m
 
     print(f"[warning] returning intent with unresolved validation issues: {error_feedback}")
     return last_intent
-# generating sql using the intent — NOT traced, deterministic template filling
+
 SQL_TEMPLATE = "SELECT {select} FROM {table}{joins}{where}{group_by}{having}{order_by}{limit}"
+
+
+def _build_case_sql(derived_column: dict) -> str:
+    """Builds a CASE WHEN ... END AS alias expression from a derived_column spec."""
+    case_parts = []
+    for c in derived_column["cases"]:
+        w = c["when"]
+        val = w["value"]
+        if isinstance(val, str) and not val.replace('.', '', 1).isdigit():
+            val = f"'{val}'"
+        case_parts.append(f"WHEN {w['column']} {w['operator']} {val} THEN '{c['then']}'")
+    else_label = derived_column.get("else_label", "Other")
+    case_sql = "CASE " + " ".join(case_parts) + f" ELSE '{else_label}' END AS {derived_column['alias']}"
+    return case_sql
+
 
 def fill_sql_template(intent: dict) -> str:
     slots = {
@@ -544,9 +636,23 @@ def fill_sql_template(intent: dict) -> str:
     elif intent.get("column"):
         slots["select"] = intent["column"]
 
+    # NEW: derived_column support — builds a CASE WHEN expression and makes it
+    # available both as a selected column and as a valid GROUP BY target.
+    derived_column = intent.get("derived_column")
+    if derived_column:
+        case_sql = _build_case_sql(derived_column)
+        if slots["select"] == "*":
+            slots["select"] = case_sql
+        else:
+            slots["select"] = f"{case_sql}, {slots['select']}"
+
     if intent.get("group_by"):
-        slots["select"] = f"{intent['group_by']}, {slots['select']}"
-        slots["group_by"] = f" GROUP BY {intent['group_by']}"
+        group_by_target = intent["group_by"]
+        # if group_by references the derived alias, it's already in SELECT via case_sql above —
+        # don't re-prepend it as a raw column reference.
+        if not (derived_column and group_by_target == derived_column.get("alias")):
+            slots["select"] = f"{group_by_target}, {slots['select']}"
+        slots["group_by"] = f" GROUP BY {group_by_target}"
 
     if intent.get("joins"):
         for j in intent["joins"]:
@@ -594,7 +700,6 @@ def fill_sql_template(intent: dict) -> str:
     return sql.strip()
 
 
-# NOT traced — deterministic keyword check
 def sql_guardrail(sql):
     forbidden = ["INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "TRUNCATE", "REPLACE"]
     sql_upper = sql.upper()
@@ -703,7 +808,6 @@ Do not mention SQL. Do not repeat the raw rows. Just answer naturally."""
     )
     return response.choices[0].message.content.strip()
 
-#here suggestion for follow up questions
 @traceable(name="follow_up_suggestion_llm_call")
 def followup_suggestion(sql,query,schemas,rows,cols,n=3):
     top_res=rows[:5]
@@ -773,9 +877,6 @@ def health_check():
     return {"status": "ok", "message": "Titanic SQL Assistant is running"}
 
 
-# This inner function is the ONE top-level traceable per request — everything
-# it calls (standalone_question, run_pipeline, run_sql, summarize_result, etc.)
-# nests underneath it automatically in the LangSmith dashboard as a single tree.
 @traceable(name="process_query")
 def process_query(question: str, history: list[dict]):
     if input_level_guardrail(question):
